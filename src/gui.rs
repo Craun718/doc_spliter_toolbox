@@ -767,14 +767,20 @@ impl eframe::App for App {
             });
             if self.scanning {
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(format!(
-                        "扫描和分析中... {} / {}",
-                        self.analyzed_count,
-                        self.analysis_total
-                    ));
-                });
+                let scan_progress = if self.analysis_total > 0 {
+                    self.analyzed_count as f32 / self.analysis_total as f32
+                } else {
+                    0.0
+                };
+                ui.add(
+                    egui::ProgressBar::new(scan_progress)
+                        .show_percentage()
+                        .text(format!(
+                            "扫描和分析中... {} / {}",
+                            self.analyzed_count,
+                            self.analysis_total
+                        )),
+                );
             }
             if self.running {
                 ui.add_space(6.0);
