@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -279,16 +279,9 @@ impl App {
     }
 
     fn build_pdf_stub(path: PathBuf) -> PdfInfo {
-        let full_name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let display_name = if full_name.chars().count() > 24 {
-            format!("{}...", full_name.chars().take(24).collect::<String>())
-        } else {
-            full_name
-        };
-
         PdfInfo {
+            display_name: Self::truncate_file_name(&path, 24),
             path,
-            display_name,
             classification: "分析中...".to_string(),
             total_chars: 0,
             selected: true,
@@ -317,6 +310,25 @@ impl App {
 
     fn file_modified(path: &PathBuf) -> Option<SystemTime> {
         std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+    }
+
+    fn truncate_file_name(path: &Path, max_stem_chars: usize) -> String {
+        let full_name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .filter(|ext| !ext.is_empty());
+
+        if stem.chars().count() <= max_stem_chars {
+            return full_name;
+        }
+
+        let truncated_stem = stem.chars().take(max_stem_chars).collect::<String>();
+        match ext {
+            Some(ext) => format!("{}....{}", truncated_stem, ext),
+            None => format!("{}...", truncated_stem),
+        }
     }
 
     fn cached_analysis(
@@ -607,6 +619,14 @@ impl App {
             f.selected = !f.selected;
         }
     }
+
+    fn current_file_progress(&self) -> f32 {
+        if self.current_file_total_pages == 0 {
+            0.0
+        } else {
+            (self.current_file_page as f32 / self.current_file_total_pages as f32).clamp(0.0, 1.0)
+        }
+    }
 }
 
 fn load_chinese_font(ctx: &egui::Context) {
@@ -752,17 +772,20 @@ impl eframe::App for App {
                         )),
                 );
                 if !self.current_file_name.is_empty() {
-                    let page_text = if self.current_file_total_pages > 0 {
-                        format!(
-                            "当前文件: {}  ({}/{})",
-                            self.current_file_name,
-                            self.current_file_page,
-                            self.current_file_total_pages
-                        )
-                    } else {
-                        format!("当前文件: {}", self.current_file_name)
-                    };
-                    ui.label(page_text);
+                    ui.add(
+                        egui::ProgressBar::new(self.current_file_progress())
+                            .show_percentage()
+                            .text(if self.current_file_total_pages > 0 {
+                                format!(
+                                    "当前文件进度 {}/{}",
+                                    self.current_file_page,
+                                    self.current_file_total_pages
+                                )
+                            } else {
+                                "当前文件进度".to_string()
+                            }),
+                    );
+                    ui.label(format!("当前文件: {}", self.current_file_name));
                 }
             }
             });
@@ -778,6 +801,9 @@ impl eframe::App for App {
                     self.selected_count(),
                     self.files.len()
                 ));
+                if !self.files.is_empty() {
+                    ui.label("只会切割勾选的文件");
+                }
                 ui.add_enabled_ui(!self.running && !self.files.is_empty(), |ui| {
                     ui.horizontal(|ui| {
                         if ui.button("全选").clicked() {
@@ -801,7 +827,7 @@ impl eframe::App for App {
                             .column(Column::auto().at_least(80.0))
                             .header(20.0, |mut header| {
                                 header.col(|ui| { ui.strong("选择"); });
-                                header.col(|ui| { ui.strong("文件名"); });
+                                header.col(|ui| { ui.strong("文件名（含后缀）"); });
                                 header.col(|ui| { ui.strong("分类"); });
                                 header.col(|ui| { ui.strong("总字数"); });
                             })
@@ -812,8 +838,15 @@ impl eframe::App for App {
                                             ui.add_enabled(!self.running, egui::Checkbox::without_text(&mut f.selected));
                                         });
                                         row.col(|ui| {
-                                            ui.label(&f.display_name)
-                                                .on_hover_text(f.path.file_name().unwrap_or_default().to_string_lossy());
+                                            let response = ui.add(
+                                                egui::Button::new(&f.display_name).selected(f.selected),
+                                            );
+                                            if response.clicked() && !self.running {
+                                                f.selected = !f.selected;
+                                            }
+                                            response.on_hover_text(
+                                                f.path.file_name().unwrap_or_default().to_string_lossy(),
+                                            );
                                         });
                                         row.col(|ui| { ui.label(&f.classification); });
                                         row.col(|ui| {
