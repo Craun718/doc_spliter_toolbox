@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use walkdir::WalkDir;
 
-use crate::extract::{analyze_text_stats, classify_pdf};
+use crate::extract::{analyze_text_stats, classify_pdf, format_size};
 use crate::split::{self, SplitControl};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -24,6 +24,8 @@ pub struct PdfInfo {
     pub display_name: String,
     pub classification: String,
     pub total_chars: usize,
+    pub total_pages: usize,
+    pub file_size: u64,
     pub selected: bool,
     pub analyzed: bool,
 }
@@ -33,6 +35,7 @@ struct AnalysisCacheEntry {
     modified: Option<SystemTime>,
     classification: String,
     total_chars: usize,
+    total_pages: usize,
 }
 
 /// Messages sent from worker thread to GUI
@@ -49,6 +52,7 @@ enum WorkerMsg {
         modified: Option<SystemTime>,
         classification: String,
         total_chars: usize,
+        total_pages: usize,
     },
     FileStarted {
         index: usize,
@@ -191,13 +195,14 @@ impl App {
                 .partition(|path| Self::cached_analysis(path, &cache).is_some());
 
             for path in cached_paths {
-                if let Some((modified, classification, total_chars)) = Self::cached_analysis(&path, &cache) {
+                if let Some((modified, classification, total_chars, total_pages)) = Self::cached_analysis(&path, &cache) {
                     let _ = tx.send(WorkerMsg::AnalysisUpdated {
                         scan_id,
                         path,
                         modified,
                         classification,
                         total_chars,
+                        total_pages,
                     });
                 }
             }
@@ -220,6 +225,7 @@ impl App {
                                 modified,
                                 classification: info.classification,
                                 total_chars: info.total_chars,
+                                total_pages: info.total_pages,
                             });
                         });
                     });
@@ -234,6 +240,7 @@ impl App {
                             modified,
                             classification: info.classification,
                             total_chars: info.total_chars,
+                            total_pages: info.total_pages,
                         });
                     }
                 }
@@ -279,11 +286,14 @@ impl App {
     }
 
     fn build_pdf_stub(path: PathBuf) -> PdfInfo {
+        let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         PdfInfo {
             display_name: Self::truncate_file_name(&path, 24),
             path,
             classification: "分析中...".to_string(),
             total_chars: 0,
+            total_pages: 0,
+            file_size,
             selected: true,
             analyzed: false,
         }
@@ -291,19 +301,22 @@ impl App {
 
     fn analyze_pdf(path: PathBuf) -> PdfInfo {
         let mut info = Self::build_pdf_stub(path.clone());
-        let (classification, total_chars) = match lopdf::Document::load(&path) {
+        let (classification, total_chars, total_pages) = match lopdf::Document::load(&path) {
             Ok(doc) => {
+                let page_count = doc.get_pages().len();
                 let stats = analyze_text_stats(&doc);
                 (
                     classify_pdf(stats.avg_chars_per_page).to_string(),
                     stats.total_chars,
+                    page_count,
                 )
             }
-            Err(_) => ("无法读取".to_string(), 0),
+            Err(_) => ("无法读取".to_string(), 0, 0),
         };
 
         info.classification = classification;
         info.total_chars = total_chars;
+        info.total_pages = total_pages;
         info.analyzed = true;
         info
     }
@@ -334,11 +347,11 @@ impl App {
     fn cached_analysis(
         path: &PathBuf,
         cache: &HashMap<PathBuf, AnalysisCacheEntry>,
-    ) -> Option<(Option<SystemTime>, String, usize)> {
+    ) -> Option<(Option<SystemTime>, String, usize, usize)> {
         let modified = Self::file_modified(path);
         let entry = cache.get(path)?;
         if entry.modified == modified {
-            Some((modified, entry.classification.clone(), entry.total_chars))
+            Some((modified, entry.classification.clone(), entry.total_chars, entry.total_pages))
         } else {
             None
         }
@@ -495,6 +508,7 @@ impl App {
                         modified,
                         classification,
                         total_chars,
+                        total_pages,
                     } => {
                         if scan_id != self.scan_id {
                             continue;
@@ -503,6 +517,7 @@ impl App {
                             let was_analyzed = file.analyzed;
                             file.classification = classification.clone();
                             file.total_chars = total_chars;
+                            file.total_pages = total_pages;
                             file.analyzed = true;
                             self.analysis_cache.insert(
                                 path.clone(),
@@ -510,6 +525,7 @@ impl App {
                                     modified,
                                     classification,
                                     total_chars,
+                                    total_pages,
                                 },
                             );
                             if !was_analyzed {
@@ -822,11 +838,15 @@ impl eframe::App for App {
                         TableBuilder::new(ui)
                             .striped(true)
                             .column(Column::auto().at_least(36.0))
+                            .column(Column::auto().at_least(56.0))
+                            .column(Column::auto().at_least(44.0))
                             .column(Column::remainder().at_least(120.0))
                             .column(Column::auto().at_least(60.0))
                             .column(Column::auto().at_least(80.0))
                             .header(20.0, |mut header| {
                                 header.col(|ui| { ui.strong("选择"); });
+                                header.col(|ui| { ui.strong("大小"); });
+                                header.col(|ui| { ui.strong("页数"); });
                                 header.col(|ui| { ui.strong("文件名（含后缀）"); });
                                 header.col(|ui| { ui.strong("分类"); });
                                 header.col(|ui| { ui.strong("总字数"); });
@@ -836,6 +856,16 @@ impl eframe::App for App {
                                     body.row(18.0, |mut row| {
                                         row.col(|ui| {
                                             ui.add_enabled(!self.running, egui::Checkbox::without_text(&mut f.selected));
+                                        });
+                                        row.col(|ui| {
+                                            ui.label(format_size(f.file_size));
+                                        });
+                                        row.col(|ui| {
+                                            if f.analyzed {
+                                                ui.label(format!("{}", f.total_pages));
+                                            } else {
+                                                ui.label("...");
+                                            }
                                         });
                                         row.col(|ui| {
                                             let response = ui.add(
