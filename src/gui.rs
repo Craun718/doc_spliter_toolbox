@@ -13,6 +13,12 @@ use walkdir::WalkDir;
 use crate::extract::{analyze_text_stats, classify_pdf};
 use crate::split::{self, SplitControl};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SplitMode {
+    BySize,
+    ByPages,
+}
+
 pub struct PdfInfo {
     pub path: PathBuf,
     pub display_name: String,
@@ -62,14 +68,15 @@ enum WorkerMsg {
 }
 
 pub struct App {
-    directory: Option<PathBuf>,
+    source_label: String,
     files: Vec<PdfInfo>,
     logs: Vec<String>,
     max_size_mb: u64,
+    pages_per_chunk: usize,
+    split_mode: SplitMode,
     running: bool,
     paused: bool,
     delete_after: bool,
-    recursive: bool,
     scanning: bool,
     scan_id: u64,
     analysis_cache: HashMap<PathBuf, AnalysisCacheEntry>,
@@ -96,14 +103,15 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
-            directory: None,
+            source_label: String::new(),
             files: Vec::new(),
             logs: Vec::new(),
             max_size_mb: 50,
+            pages_per_chunk: 100,
+            split_mode: SplitMode::BySize,
             running: false,
             paused: false,
             delete_after: false,
-            recursive: false,
             scanning: false,
             scan_id: 0,
             analysis_cache: HashMap::new(),
@@ -131,18 +139,27 @@ impl App {
         Self::default()
     }
 
-    fn pick_directory(&mut self) {
-        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-            self.directory = Some(dir);
-            self.scan_directory();
+    fn pick_pdfs(&mut self) {
+        if let Some(paths) = rfd::FileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .pick_files()
+        {
+            self.source_label = format!("已选择 {} 个 PDF 文件", paths.len());
+            self.scan_paths(paths);
         }
     }
 
-    fn scan_directory(&mut self) {
-        let dir = match &self.directory {
-            Some(d) => d.clone(),
-            None => return,
-        };
+    fn pick_directory(&mut self) {
+        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+            self.source_label = format!("目录: {}（递归）", dir.display());
+            self.scan_paths(vec![dir]);
+        }
+    }
+
+    fn scan_paths(&mut self, inputs: Vec<PathBuf>) {
+        if inputs.is_empty() {
+            return;
+        }
 
         self.files.clear();
         self.logs.clear();
@@ -152,21 +169,19 @@ impl App {
         self.analysis_total = 0;
         self.analyzed_count = 0;
         self.logs.push(format!(
-            "正在扫描目录: {}{}",
-            dir.display(),
-            if self.recursive { "（含子目录）" } else { "" }
+            "正在扫描输入: {}",
+            self.source_label
         ));
 
         let (tx, rx) = mpsc::channel();
         self.scan_tx = Some(tx.clone());
         self.scan_rx = Some(rx);
-        let recursive = self.recursive;
         let cache = self.analysis_cache.clone();
 
         thread::spawn(move || {
-            let mut paths = Self::collect_pdfs(&dir, recursive);
+            let mut paths = Self::collect_pdfs_from_inputs(&inputs);
             paths.sort();
-            let _ = tx.send(WorkerMsg::ScanLog(format!("目录扫描完成，找到 {} 个 PDF", paths.len())));
+            let _ = tx.send(WorkerMsg::ScanLog(format!("扫描完成，找到 {} 个 PDF", paths.len())));
 
             let files: Vec<PdfInfo> = paths.iter().cloned().map(Self::build_pdf_stub).collect();
             let _ = tx.send(WorkerMsg::ScanFinished { scan_id, files });
@@ -226,27 +241,41 @@ impl App {
         });
     }
 
-    fn collect_pdfs(dir: &PathBuf, recursive: bool) -> Vec<PathBuf> {
-        let max_depth = if recursive { usize::MAX } else { 1 };
-        WalkDir::new(dir)
-            .max_depth(max_depth)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_file())
-            .map(|entry| entry.into_path())
-            .filter(|path| {
-                path.extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.eq_ignore_ascii_case("pdf"))
-                    .unwrap_or(false)
-            })
-            .filter(|path| {
-                !path.file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .contains("_part")
-            })
-            .collect()
+    fn collect_pdfs_from_inputs(inputs: &[PathBuf]) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for input in inputs {
+            if input.is_file() {
+                if Self::is_pdf_candidate(input) {
+                    files.push(input.clone());
+                }
+                continue;
+            }
+            if input.is_dir() {
+                files.extend(
+                    WalkDir::new(input)
+                        .into_iter()
+                        .filter_map(Result::ok)
+                        .filter(|entry| entry.file_type().is_file())
+                        .map(|entry| entry.into_path())
+                        .filter(Self::is_pdf_candidate),
+                );
+            }
+        }
+        files.sort();
+        files.dedup();
+        files
+    }
+
+    fn is_pdf_candidate(path: &PathBuf) -> bool {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("pdf"))
+            .unwrap_or(false)
+            && !path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .contains("_part")
     }
 
     fn build_pdf_stub(path: PathBuf) -> PdfInfo {
@@ -337,6 +366,8 @@ impl App {
 
         let files = selected_files;
         let max_size = self.max_size_mb * 1024 * 1024;
+        let pages_per_chunk = self.pages_per_chunk;
+        let split_mode = self.split_mode;
 
         thread::spawn(move || {
             let total = files.len();
@@ -363,20 +394,37 @@ impl App {
                 let tx_clone = tx.clone();
                 let ctrl_clone = control.clone();
                 let progress_tx = tx.clone();
-                match split::split_by_size_with_callback(
-                    fpath,
-                    max_size,
-                    &ctrl_clone,
-                    move |msg| {
-                        let _ = tx_clone.send(WorkerMsg::Log(msg.to_string()));
-                    },
-                    move |current_page, total_pages| {
-                        let _ = progress_tx.send(WorkerMsg::FileProgress {
-                            current_page,
-                            total_pages,
-                        });
-                    },
-                ) {
+                let split_result = match split_mode {
+                    SplitMode::BySize => split::split_by_size_with_callback(
+                        fpath,
+                        max_size,
+                        &ctrl_clone,
+                        move |msg| {
+                            let _ = tx_clone.send(WorkerMsg::Log(msg.to_string()));
+                        },
+                        move |current_page, total_pages| {
+                            let _ = progress_tx.send(WorkerMsg::FileProgress {
+                                current_page,
+                                total_pages,
+                            });
+                        },
+                    ),
+                    SplitMode::ByPages => split::split_by_page_count_with_callback(
+                        fpath,
+                        pages_per_chunk,
+                        &ctrl_clone,
+                        move |msg| {
+                            let _ = tx_clone.send(WorkerMsg::Log(msg.to_string()));
+                        },
+                        move |current_page, total_pages| {
+                            let _ = progress_tx.send(WorkerMsg::FileProgress {
+                                current_page,
+                                total_pages,
+                            });
+                        },
+                    ),
+                };
+                match split_result {
                     Ok(outputs) => {
                         let _ = tx.send(WorkerMsg::Log(format!("  → 生成 {} 个文件", outputs.len())));
                     }
@@ -421,9 +469,9 @@ impl App {
                         self.analyzed_count = 0;
                         self.scanning = total > 0;
                         self.logs.push(format!(
-                            "已选择目录，共 {} 个 PDF 文件{}",
-                            total,
-                            if self.recursive { "（含子目录）" } else { "" }
+                            "{}，共 {} 个 PDF 文件",
+                            self.source_label,
+                            total
                         ));
                         if total == 0 {
                             self.scanning = false;
@@ -603,6 +651,10 @@ impl eframe::App for App {
             .show_separator_line(true)
             .show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
+                if ui.button("选择 PDF").clicked() && !self.running {
+                    self.pick_pdfs();
+                }
+
                 if ui.button("选择目录").clicked() && !self.running {
                     self.pick_directory();
                 }
@@ -660,18 +712,22 @@ impl eframe::App for App {
 
                 ui.separator();
 
-                ui.label("每块上限 (MB):");
-                ui.add(egui::DragValue::new(&mut self.max_size_mb).range(1..=1000));
+                ui.label("切分方式:");
+                ui.radio_value(&mut self.split_mode, SplitMode::BySize, "按大小");
+                ui.radio_value(&mut self.split_mode, SplitMode::ByPages, "按页数");
+
+                match self.split_mode {
+                    SplitMode::BySize => {
+                        ui.label("每块上限 (MB):");
+                        ui.add(egui::DragValue::new(&mut self.max_size_mb).range(1..=1000));
+                    }
+                    SplitMode::ByPages => {
+                        ui.label("每块页数:");
+                        ui.add(egui::DragValue::new(&mut self.pages_per_chunk).range(1..=10000));
+                    }
+                }
 
                 ui.checkbox(&mut self.delete_after, "切割后删除源文件");
-
-                let prev_recursive = self.recursive;
-                ui.add_enabled_ui(!self.running, |ui| {
-                    ui.checkbox(&mut self.recursive, "递归查找子目录");
-                });
-                if self.recursive != prev_recursive && self.directory.is_some() {
-                    self.scan_directory();
-                }
             });
             if self.scanning {
                 ui.add_space(6.0);

@@ -241,6 +241,134 @@ pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
     Ok(output_files)
 }
 
+/// Split a PDF into chunks with at most `pages_per_chunk` pages.
+pub fn split_by_page_count(
+    pdf_path: &Path,
+    pages_per_chunk: usize,
+    quiet: bool,
+) -> Result<Vec<PathBuf>> {
+    let doc = lopdf::Document::load(pdf_path)?;
+    let stem = pdf_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let parent = pdf_path.parent().unwrap_or_else(|| Path::new("."));
+
+    let pages: Vec<(u32, lopdf::ObjectId)> = doc.get_pages().into_iter().collect();
+    let total_pages = pages.len();
+
+    if total_pages == 0 {
+        bail!("PDF has no pages");
+    }
+    if pages_per_chunk == 0 {
+        bail!("pages_per_chunk must be greater than 0");
+    }
+
+    let text_stats = analyze_text_stats(&doc);
+    let pdf_type = classify_pdf(text_stats.avg_chars_per_page);
+
+    let pb = if !quiet {
+        let pb = ProgressBar::new(total_pages as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{msg} [{bar:40.cyan/dim}] {pos}/{len} 页")
+                .unwrap()
+                .progress_chars("█▓░"),
+        );
+        pb.set_message(format!("切割 {}", pdf_path.file_name().unwrap_or_default().to_string_lossy()));
+        pb
+    } else {
+        ProgressBar::hidden()
+    };
+
+    let mut chunk: Vec<usize> = Vec::new();
+    let mut part = 1u32;
+    let mut output_files = Vec::new();
+
+    for i in 0..total_pages {
+        pb.inc(1);
+        chunk.push(i);
+
+        if chunk.len() < pages_per_chunk && i + 1 < total_pages {
+            continue;
+        }
+
+        let out_path = save_chunk(&doc, parent, stem, &chunk, part)?;
+        print_chunk_info(&out_path, &chunk, pdf_type, text_stats.avg_chars_per_page);
+        output_files.push(out_path);
+        part += 1;
+        chunk.clear();
+    }
+
+    pb.finish_with_message("完成");
+    Ok(output_files)
+}
+
+/// Like `split_by_page_count`, but sends log messages and page progress to callbacks (for GUI).
+pub fn split_by_page_count_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
+    pdf_path: &Path,
+    pages_per_chunk: usize,
+    control: &SplitControl,
+    mut log: F,
+    mut progress: P,
+) -> Result<Vec<PathBuf>> {
+    let doc = lopdf::Document::load(pdf_path)?;
+    let stem = pdf_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let parent = pdf_path.parent().unwrap_or_else(|| Path::new("."));
+
+    let pages: Vec<(u32, lopdf::ObjectId)> = doc.get_pages().into_iter().collect();
+    let total_pages = pages.len();
+
+    if total_pages == 0 {
+        bail!("PDF has no pages");
+    }
+    if pages_per_chunk == 0 {
+        bail!("pages_per_chunk must be greater than 0");
+    }
+
+    let text_stats = analyze_text_stats(&doc);
+    let pdf_type = classify_pdf(text_stats.avg_chars_per_page);
+    progress(0, total_pages);
+
+    let mut chunk: Vec<usize> = Vec::new();
+    let mut part = 1u32;
+    let mut output_files = Vec::new();
+
+    for i in 0..total_pages {
+        if control.is_stopped() {
+            log("  已停止，保留已处理结果");
+            break;
+        }
+
+        control.wait_if_paused();
+
+        if control.is_stopped() {
+            log("  已停止，保留已处理结果");
+            break;
+        }
+
+        progress(i + 1, total_pages);
+        chunk.push(i);
+
+        if chunk.len() < pages_per_chunk && i + 1 < total_pages {
+            continue;
+        }
+
+        let out_path = save_chunk(&doc, parent, stem, &chunk, part)?;
+        let info = chunk_info_str(&out_path, &chunk, pdf_type, text_stats.avg_chars_per_page);
+        log(&info);
+        output_files.push(out_path);
+        part += 1;
+        chunk.clear();
+    }
+
+    progress(total_pages, total_pages);
+    Ok(output_files)
+}
+
 fn save_chunk(
     doc: &lopdf::Document,
     parent: &Path,
