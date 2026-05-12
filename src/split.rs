@@ -4,6 +4,7 @@ use std::sync::{Condvar, Mutex};
 
 use anyhow::{bail, Result};
 use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 
 use crate::extract::{analyze_text_stats, classify_pdf, extract_pages_to_bytes, extract_pages_to_file, format_size};
 
@@ -56,6 +57,9 @@ impl SplitControl {
 
 /// Split a PDF into chunks no larger than `max_size` bytes.
 /// Returns the list of output file paths.
+///
+/// Pre-measures each page's byte size (parallel), then determines chunk
+/// boundaries by prefix sum — O(n) instead of O(n·chunk_size) serializations.
 pub fn split_by_size(
     pdf_path: &Path,
     max_size: u64,
@@ -68,15 +72,14 @@ pub fn split_by_size(
         .unwrap_or("output");
     let parent = pdf_path.parent().unwrap_or_else(|| Path::new("."));
 
-    let pages: Vec<(u32, lopdf::ObjectId)> = doc.get_pages().into_iter().collect();
-    let total_pages = pages.len();
-
+    let total_pages = doc.get_pages().len();
     if total_pages == 0 {
         bail!("PDF has no pages");
     }
     let text_stats = analyze_text_stats(&doc);
     let pdf_type = classify_pdf(text_stats.avg_chars_per_page);
 
+    // Phase 1: measure individual page sizes (parallel)
     let pb = if !quiet {
         let pb = ProgressBar::new(total_pages as u64);
         pb.set_style(
@@ -85,61 +88,37 @@ pub fn split_by_size(
                 .unwrap()
                 .progress_chars("█▓░"),
         );
-        pb.set_message(format!("切割 {}", pdf_path.file_name().unwrap_or_default().to_string_lossy()));
+        pb.set_message(format!("测量 {}", pdf_path.file_name().unwrap_or_default().to_string_lossy()));
         pb
     } else {
         ProgressBar::hidden()
     };
 
-    let mut chunk: Vec<usize> = Vec::new();
+    let page_sizes: Vec<u64> = (0..total_pages)
+        .into_par_iter()
+        .map(|i| {
+            extract_pages_to_bytes(&doc, &[i])
+                .map(|b| b.len() as u64)
+                .unwrap_or(0)
+        })
+        .collect();
+
+    // Phase 2: determine chunk boundaries by prefix sum
+    let chunks = compute_chunks(&page_sizes, max_size);
+
+    // Phase 3: save chunks
+    pb.set_message(format!("保存 {}", pdf_path.file_name().unwrap_or_default().to_string_lossy()));
+    pb.set_length(chunks.len() as u64);
+    pb.reset();
+
     let mut part = 1u32;
     let mut output_files = Vec::new();
-
-    for i in 0..total_pages {
-        pb.inc(1);
-
-        let chunk_was_empty = chunk.is_empty();
-        chunk.push(i);
-        let candidate_size = extract_pages_to_bytes(&doc, &chunk)?.len() as u64;
-
-        if candidate_size <= max_size {
-            continue;
-        }
-
-        chunk.pop();
-
-        // Current chunk is full; flush it
-        if !chunk.is_empty() {
-            let out_path = save_chunk(&doc, parent, stem, &chunk, part)?;
-            print_chunk_info(&out_path, &chunk, pdf_type, text_stats.avg_chars_per_page);
-            output_files.push(out_path);
-            part += 1;
-        }
-
-        // Handle current page
-        let single_size = if chunk_was_empty {
-            candidate_size
-        } else {
-            extract_pages_to_bytes(&doc, &[i])?.len() as u64
-        };
-        if single_size > max_size {
-            // Single page exceeds limit — save as-is
-            let out_path = save_chunk(&doc, parent, stem, &[i], part)?;
-            print_chunk_info(&out_path, &[i], pdf_type, text_stats.avg_chars_per_page);
-            output_files.push(out_path);
-            part += 1;
-            chunk.clear();
-        } else {
-            chunk.clear();
-            chunk.push(i);
-        }
-    }
-
-    // Flush final chunk
-    if !chunk.is_empty() {
-        let out_path = save_chunk(&doc, parent, stem, &chunk, part)?;
-        print_chunk_info(&out_path, &chunk, pdf_type, text_stats.avg_chars_per_page);
+    for chunk in &chunks {
+        let out_path = save_chunk(&doc, parent, stem, chunk, part)?;
+        print_chunk_info(&out_path, chunk, pdf_type, text_stats.avg_chars_per_page);
         output_files.push(out_path);
+        part += 1;
+        pb.inc(1);
     }
 
     pb.finish_with_message("完成");
@@ -147,6 +126,9 @@ pub fn split_by_size(
 }
 
 /// Like `split_by_size`, but sends log messages and page progress to callbacks (for GUI).
+///
+/// Pre-measures each page's byte size sequentially (with stop/pause checks),
+/// then determines chunk boundaries by prefix sum.
 pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
     pdf_path: &Path,
     max_size: u64,
@@ -161,79 +143,59 @@ pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
         .unwrap_or("output");
     let parent = pdf_path.parent().unwrap_or_else(|| Path::new("."));
 
-    let pages: Vec<(u32, lopdf::ObjectId)> = doc.get_pages().into_iter().collect();
-    let total_pages = pages.len();
-
+    let total_pages = doc.get_pages().len();
     if total_pages == 0 {
         bail!("PDF has no pages");
     }
     let text_stats = analyze_text_stats(&doc);
     let pdf_type = classify_pdf(text_stats.avg_chars_per_page);
+
+    // Phase 1: measure page sizes sequentially (with stop/pause support)
     progress(0, total_pages);
-
-    let mut chunk: Vec<usize> = Vec::new();
-    let mut part = 1u32;
-    let mut output_files = Vec::new();
-
+    let mut page_sizes = Vec::with_capacity(total_pages);
+    let mut stopped = false;
     for i in 0..total_pages {
-        // 检查停止信号
         if control.is_stopped() {
             log("  已停止，保留已处理结果");
+            stopped = true;
             break;
         }
-
-        // 检查暂停信号，阻塞直到恢复
         control.wait_if_paused();
-
-        // 再次检查停止（暂停恢复后可能立即停止）
         if control.is_stopped() {
             log("  已停止，保留已处理结果");
+            stopped = true;
             break;
         }
-
+        let bytes = extract_pages_to_bytes(&doc, &[i])?;
+        page_sizes.push(bytes.len() as u64);
         progress(i + 1, total_pages);
-
-        let chunk_was_empty = chunk.is_empty();
-        chunk.push(i);
-        let candidate_size = extract_pages_to_bytes(&doc, &chunk)?.len() as u64;
-
-        if candidate_size <= max_size {
-            continue;
-        }
-
-        chunk.pop();
-
-        if !chunk.is_empty() {
-            let out_path = save_chunk(&doc, parent, stem, &chunk, part)?;
-            let info = chunk_info_str(&out_path, &chunk, pdf_type, text_stats.avg_chars_per_page);
-            log(&info);
-            output_files.push(out_path);
-            part += 1;
-        }
-
-        let single_size = if chunk_was_empty {
-            candidate_size
-        } else {
-            extract_pages_to_bytes(&doc, &[i])?.len() as u64
-        };
-        if single_size > max_size {
-            let out_path = save_chunk(&doc, parent, stem, &[i], part)?;
-            let info = chunk_info_str(&out_path, &[i], pdf_type, text_stats.avg_chars_per_page);
-            log(&info);
-            output_files.push(out_path);
-            part += 1;
-            chunk.clear();
-        } else {
-            chunk.clear();
-            chunk.push(i);
-        }
+    }
+    if stopped {
+        return Ok(Vec::new());
     }
 
-    if !chunk.is_empty() {
-        let out_path = save_chunk(&doc, parent, stem, &chunk, part)?;
-        let info = chunk_info_str(&out_path, &chunk, pdf_type, text_stats.avg_chars_per_page);
+    // Phase 2: determine chunk boundaries by prefix sum
+    let chunks = compute_chunks(&page_sizes, max_size);
+
+    // Phase 3: save chunks
+    let mut part = 1u32;
+    let mut output_files = Vec::new();
+    for chunk in &chunks {
+        if control.is_stopped() {
+            log("  已停止，保留已处理结果");
+            break;
+        }
+        control.wait_if_paused();
+        if control.is_stopped() {
+            log("  已停止，保留已处理结果");
+            break;
+        }
+
+        let out_path = save_chunk(&doc, parent, stem, chunk, part)?;
+        let info = chunk_info_str(&out_path, chunk, pdf_type, text_stats.avg_chars_per_page);
         log(&info);
         output_files.push(out_path);
+        part += 1;
     }
 
     progress(total_pages, total_pages);
@@ -417,4 +379,36 @@ fn chunk_info_str(out_path: &Path, chunk: &[usize], pdf_type: &str, avg_chars: f
         pdf_type,
         avg_chars
     )
+}
+
+/// Given individual page byte sizes and a max chunk size, partition page
+/// indices into chunks using a greedy prefix-sum algorithm.
+fn compute_chunks(page_sizes: &[u64], max_size: u64) -> Vec<Vec<usize>> {
+    let mut chunks: Vec<Vec<usize>> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    let mut current_size: u64 = 0;
+
+    for (i, &size) in page_sizes.iter().enumerate() {
+        if current_size + size <= max_size {
+            current.push(i);
+            current_size += size;
+        } else {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+                current_size = 0;
+            }
+
+            if size > max_size {
+                // Single page exceeds limit — save as its own chunk
+                chunks.push(vec![i]);
+            } else {
+                current.push(i);
+                current_size = size;
+            }
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }

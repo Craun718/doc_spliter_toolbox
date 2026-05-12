@@ -84,6 +84,7 @@ pub struct App {
     scanning: bool,
     scan_id: u64,
     analysis_cache: HashMap<PathBuf, AnalysisCacheEntry>,
+    file_index: HashMap<PathBuf, usize>,
     analysis_total: usize,
     analyzed_count: usize,
     total_progress: f32,
@@ -119,6 +120,7 @@ impl Default for App {
             scanning: false,
             scan_id: 0,
             analysis_cache: HashMap::new(),
+            file_index: HashMap::new(),
             analysis_total: 0,
             analyzed_count: 0,
             total_progress: 0.0,
@@ -489,6 +491,7 @@ impl App {
                             continue;
                         }
                         let total = files.len();
+                        self.file_index = files.iter().enumerate().map(|(i, f)| (f.path.clone(), i)).collect();
                         self.files = files;
                         self.analysis_total = total;
                         self.analyzed_count = 0;
@@ -513,27 +516,29 @@ impl App {
                         if scan_id != self.scan_id {
                             continue;
                         }
-                        if let Some(file) = self.files.iter_mut().find(|f| f.path == path) {
-                            let was_analyzed = file.analyzed;
-                            file.classification = classification.clone();
-                            file.total_chars = total_chars;
-                            file.total_pages = total_pages;
-                            file.analyzed = true;
-                            self.analysis_cache.insert(
-                                path.clone(),
-                                AnalysisCacheEntry {
-                                    modified,
-                                    classification,
-                                    total_chars,
-                                    total_pages,
-                                },
-                            );
-                            if !was_analyzed {
-                                self.analyzed_count += 1;
-                                if self.analyzed_count >= self.analysis_total {
-                                    self.scanning = false;
-                                    self.logs.push("PDF 分析完成".to_string());
-                                    close_scan_channel = true;
+                        if let Some(&idx) = self.file_index.get(&path) {
+                            if let Some(file) = self.files.get_mut(idx) {
+                                let was_analyzed = file.analyzed;
+                                file.classification = classification.clone();
+                                file.total_chars = total_chars;
+                                file.total_pages = total_pages;
+                                file.analyzed = true;
+                                self.analysis_cache.insert(
+                                    path.clone(),
+                                    AnalysisCacheEntry {
+                                        modified,
+                                        classification,
+                                        total_chars,
+                                        total_pages,
+                                    },
+                                );
+                                if !was_analyzed {
+                                    self.analyzed_count += 1;
+                                    if self.analyzed_count >= self.analysis_total {
+                                        self.scanning = false;
+                                        self.logs.push("PDF 分析完成".to_string());
+                                        close_scan_channel = true;
+                                    }
                                 }
                             }
                         }
@@ -618,6 +623,7 @@ impl App {
         }
         self.logs.push(format!("共删除 {} 个原文件", deleted));
         self.files.retain(|f| !f.selected);
+        self.file_index = self.files.iter().enumerate().map(|(i, f)| (f.path.clone(), i)).collect();
     }
 
     fn selected_count(&self) -> usize {

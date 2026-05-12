@@ -11,9 +11,35 @@ pub struct PdfTextStats {
 }
 
 /// 单次遍历页面，完成总字数与平均每页字数统计。
+/// 先等间隔抽样 5 页做快速检测，扫描版 PDF 提前退出，避免无谓的全量提取。
 pub fn analyze_text_stats(doc: &Document) -> PdfTextStats {
-    let page_numbers: Vec<u32> = doc.get_pages().into_iter().map(|(page_num, _)| page_num).collect();
-    if page_numbers.is_empty() {
+    let page_numbers: Vec<u32> = doc
+        .get_pages()
+        .into_iter()
+        .map(|(page_num, _)| page_num)
+        .collect();
+    let total_pages = page_numbers.len();
+    if total_pages == 0 {
+        return PdfTextStats {
+            total_chars: 0,
+            avg_chars_per_page: 0.0,
+        };
+    }
+
+    // Evenly spaced sample to detect scanned PDFs early
+    let sample_count = total_pages.min(5);
+    let step = total_pages / sample_count;
+    let sample_pages: Vec<u32> = (0..sample_count)
+        .map(|k| page_numbers[k * step])
+        .collect();
+
+    let sample_chars = doc
+        .extract_text(&sample_pages)
+        .ok()
+        .map(|text| text.chars().filter(|c| !c.is_whitespace()).count())
+        .unwrap_or(0);
+
+    if sample_chars == 0 {
         return PdfTextStats {
             total_chars: 0,
             avg_chars_per_page: 0.0,
@@ -28,7 +54,7 @@ pub fn analyze_text_stats(doc: &Document) -> PdfTextStats {
 
     PdfTextStats {
         total_chars,
-        avg_chars_per_page: total_chars as f64 / page_numbers.len() as f64,
+        avg_chars_per_page: total_chars as f64 / total_pages as f64,
     }
 }
 
