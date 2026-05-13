@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(cargo build *)",
-      "Bash(cargo check *)",
-      "mcp__context7__query-docs"
-    ]
-  }
-}
