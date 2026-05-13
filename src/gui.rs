@@ -153,7 +153,9 @@ impl App {
             .pick_files()
         {
             self.source_label = format!("已选择 {} 个 PDF 文件", paths.len());
-            self.output_dir = Self::default_output_dir_from_inputs(&paths);
+            if self.output_dir.is_none() {
+                self.output_dir = Self::default_output_dir_from_inputs(&paths);
+            }
             self.scan_paths(paths);
         }
     }
