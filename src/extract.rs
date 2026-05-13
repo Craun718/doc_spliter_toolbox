@@ -58,6 +58,40 @@ pub fn analyze_text_stats(doc: &Document) -> PdfTextStats {
     }
 }
 
+/// 仅抽样少量页面估算平均字数，用于切割阶段的轻量分类展示。
+pub fn estimate_avg_chars_per_page(doc: &Document) -> f64 {
+    let page_numbers: Vec<u32> = doc
+        .get_pages()
+        .into_iter()
+        .map(|(page_num, _)| page_num)
+        .collect();
+    let total_pages = page_numbers.len();
+    if total_pages == 0 {
+        return 0.0;
+    }
+
+    let sample_count = total_pages.min(5);
+    let sample_indices: Vec<usize> = if sample_count == 1 {
+        vec![0]
+    } else {
+        (0..sample_count)
+            .map(|k| k * (total_pages - 1) / (sample_count - 1))
+            .collect()
+    };
+    let sample_pages: Vec<u32> = sample_indices
+        .into_iter()
+        .map(|idx| page_numbers[idx])
+        .collect();
+
+    let sample_chars = doc
+        .extract_text(&sample_pages)
+        .ok()
+        .map(|text| text.chars().filter(|c| !c.is_whitespace()).count())
+        .unwrap_or(0);
+
+    sample_chars as f64 / sample_pages.len() as f64
+}
+
 /// 根据平均每页字数判断PDF类型
 pub fn classify_pdf(avg_chars: f64) -> &'static str {
     if avg_chars >= 100.0 {

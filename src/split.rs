@@ -6,7 +6,7 @@ use anyhow::{bail, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
-use crate::extract::{analyze_text_stats, classify_pdf, extract_pages_to_bytes, extract_pages_to_file, format_size};
+use crate::extract::{classify_pdf, estimate_avg_chars_per_page, extract_pages_to_bytes, extract_pages_to_file, format_size};
 
 /// 控制信号：用于暂停/恢复/停止切割任务
 pub struct SplitControl {
@@ -77,8 +77,8 @@ pub fn split_by_size(
     if total_pages == 0 {
         bail!("PDF has no pages");
     }
-    let text_stats = analyze_text_stats(&doc);
-    let pdf_type = classify_pdf(text_stats.avg_chars_per_page);
+    let avg_chars = estimate_avg_chars_per_page(&doc);
+    let pdf_type = classify_pdf(avg_chars);
 
     // Phase 1: measure individual page sizes (parallel)
     let pb = if !quiet {
@@ -103,6 +103,7 @@ pub fn split_by_size(
                 .unwrap_or(0)
         })
         .collect();
+    pb.set_position(total_pages as u64);
 
     // Phase 2: determine chunk boundaries by prefix sum
     let chunks = compute_chunks(&page_sizes, max_size);
@@ -116,7 +117,7 @@ pub fn split_by_size(
     let mut output_files = Vec::new();
     for chunk in &chunks {
         let out_path = save_chunk(&doc, parent, stem, chunk, part)?;
-        print_chunk_info(&out_path, chunk, pdf_type, text_stats.avg_chars_per_page);
+        print_chunk_info(&out_path, chunk, pdf_type, avg_chars);
         output_files.push(out_path);
         part += 1;
         pb.inc(1);
@@ -149,8 +150,8 @@ pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
     if total_pages == 0 {
         bail!("PDF has no pages");
     }
-    let text_stats = analyze_text_stats(&doc);
-    let pdf_type = classify_pdf(text_stats.avg_chars_per_page);
+    let avg_chars = estimate_avg_chars_per_page(&doc);
+    let pdf_type = classify_pdf(avg_chars);
 
     // Phase 1: measure page sizes sequentially (with stop/pause support)
     progress(0, total_pages);
@@ -194,7 +195,7 @@ pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
         }
 
         let out_path = save_chunk(&doc, parent, stem, chunk, part)?;
-        let info = chunk_info_str(&out_path, chunk, pdf_type, text_stats.avg_chars_per_page);
+        let info = chunk_info_str(&out_path, chunk, pdf_type, avg_chars);
         log(&info);
         output_files.push(out_path);
         part += 1;
@@ -229,8 +230,8 @@ pub fn split_by_page_count(
         bail!("pages_per_chunk must be greater than 0");
     }
 
-    let text_stats = analyze_text_stats(&doc);
-    let pdf_type = classify_pdf(text_stats.avg_chars_per_page);
+    let avg_chars = estimate_avg_chars_per_page(&doc);
+    let pdf_type = classify_pdf(avg_chars);
 
     let pb = if !quiet {
         let pb = ProgressBar::new(total_pages as u64);
@@ -259,7 +260,7 @@ pub fn split_by_page_count(
         }
 
         let out_path = save_chunk(&doc, parent, stem, &chunk, part)?;
-        print_chunk_info(&out_path, &chunk, pdf_type, text_stats.avg_chars_per_page);
+        print_chunk_info(&out_path, &chunk, pdf_type, avg_chars);
         output_files.push(out_path);
         part += 1;
         chunk.clear();
@@ -295,8 +296,8 @@ pub fn split_by_page_count_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>
         bail!("pages_per_chunk must be greater than 0");
     }
 
-    let text_stats = analyze_text_stats(&doc);
-    let pdf_type = classify_pdf(text_stats.avg_chars_per_page);
+    let avg_chars = estimate_avg_chars_per_page(&doc);
+    let pdf_type = classify_pdf(avg_chars);
     progress(0, total_pages);
 
     let mut chunk: Vec<usize> = Vec::new();
@@ -324,7 +325,7 @@ pub fn split_by_page_count_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>
         }
 
         let out_path = save_chunk(&doc, parent, stem, &chunk, part)?;
-        let info = chunk_info_str(&out_path, &chunk, pdf_type, text_stats.avg_chars_per_page);
+        let info = chunk_info_str(&out_path, &chunk, pdf_type, avg_chars);
         log(&info);
         output_files.push(out_path);
         part += 1;
