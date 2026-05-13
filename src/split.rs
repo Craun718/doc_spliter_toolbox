@@ -4,9 +4,8 @@ use std::sync::{Condvar, Mutex};
 
 use anyhow::{bail, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use rayon::prelude::*;
 
-use crate::extract::{classify_pdf, estimate_avg_chars_per_page, extract_pages_to_bytes, extract_pages_to_file, format_size};
+use crate::extract::{classify_pdf, estimate_avg_chars_per_page, extract_pages_to_file, format_size};
 
 /// 控制信号：用于暂停/恢复/停止切割任务
 pub struct SplitControl {
@@ -80,7 +79,7 @@ pub fn split_by_size(
     let avg_chars = estimate_avg_chars_per_page(&doc);
     let pdf_type = classify_pdf(avg_chars);
 
-    // Phase 1: measure individual page sizes (parallel)
+    // Phase 1: measure cumulative page sizes (1 clone + sequential saves)
     let pb = if !quiet {
         let pb = ProgressBar::new(total_pages as u64);
         pb.set_style(
@@ -95,18 +94,28 @@ pub fn split_by_size(
         ProgressBar::hidden()
     };
 
-    let page_sizes: Vec<u64> = (0..total_pages)
-        .into_par_iter()
-        .map(|i| {
-            extract_pages_to_bytes(&doc, &[i])
-                .map(|b| b.len() as u64)
-                .unwrap_or(0)
-        })
-        .collect();
+    // cumulative_sizes[i] = exact byte size of pages [i..N) saved together
+    // cumulative_sizes[total_pages] = 0 (empty document)
+    let mut cumulative_sizes = vec![0u64; total_pages + 1];
+    {
+        let mut working = doc.clone();
+        let mut buf = Vec::new();
+        working.save_to(&mut buf)?;
+        cumulative_sizes[0] = buf.len() as u64;
+
+        for i in 1..total_pages {
+            working.delete_pages(&[1]);
+            working.prune_objects();
+            let mut buf = Vec::new();
+            working.save_to(&mut buf)?;
+            cumulative_sizes[i] = buf.len() as u64;
+            pb.inc(1);
+        }
+    }
     pb.set_position(total_pages as u64);
 
-    // Phase 2: determine chunk boundaries by prefix sum
-    let chunks = compute_chunks(&page_sizes, max_size);
+    // Phase 2: determine chunk boundaries from cumulative sizes (exact)
+    let chunks = compute_chunks_from_cumulative(&cumulative_sizes, max_size);
 
     // Phase 3: save chunks
     pb.set_message(format!("保存 {}", pdf_path.file_name().unwrap_or_default().to_string_lossy()));
@@ -153,32 +162,48 @@ pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
     let avg_chars = estimate_avg_chars_per_page(&doc);
     let pdf_type = classify_pdf(avg_chars);
 
-    // Phase 1: measure page sizes sequentially (with stop/pause support)
+    // Phase 1: measure cumulative page sizes (with stop/pause support)
     progress(0, total_pages);
-    let mut page_sizes = Vec::with_capacity(total_pages);
-    let mut stopped = false;
-    for i in 0..total_pages {
+    let mut cumulative_sizes = vec![0u64; total_pages + 1];
+    {
         if control.is_stopped() {
             log("  已停止，保留已处理结果");
-            stopped = true;
-            break;
+            return Ok(Vec::new());
         }
+        let mut working = doc.clone();
         control.wait_if_paused();
         if control.is_stopped() {
             log("  已停止，保留已处理结果");
-            stopped = true;
-            break;
+            return Ok(Vec::new());
         }
-        let bytes = extract_pages_to_bytes(&doc, &[i])?;
-        page_sizes.push(bytes.len() as u64);
-        progress(i + 1, total_pages);
-    }
-    if stopped {
-        return Ok(Vec::new());
+
+        let mut buf = Vec::new();
+        working.save_to(&mut buf)?;
+        cumulative_sizes[0] = buf.len() as u64;
+        progress(1, total_pages);
+
+        for i in 1..total_pages {
+            if control.is_stopped() {
+                log("  已停止，保留已处理结果");
+                return Ok(Vec::new());
+            }
+            control.wait_if_paused();
+            if control.is_stopped() {
+                log("  已停止，保留已处理结果");
+                return Ok(Vec::new());
+            }
+
+            working.delete_pages(&[1]);
+            working.prune_objects();
+            let mut buf = Vec::new();
+            working.save_to(&mut buf)?;
+            cumulative_sizes[i] = buf.len() as u64;
+            progress(i + 1, total_pages);
+        }
     }
 
     // Phase 2: determine chunk boundaries by prefix sum
-    let chunks = compute_chunks(&page_sizes, max_size);
+    let chunks = compute_chunks_from_cumulative(&cumulative_sizes, max_size);
 
     // Phase 3: save chunks
     let mut part = 1u32;
@@ -207,6 +232,10 @@ pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
 }
 
 /// Split a PDF into chunks with at most `pages_per_chunk` pages.
+///
+/// Uses a single working document that progressively shrinks — avoids O(N²)
+/// clone overhead by cloning progressively smaller documents instead of
+/// repeatedly cloning the full source.
 pub fn split_by_page_count(
     pdf_path: &Path,
     output_dir: Option<&Path>,
@@ -220,8 +249,7 @@ pub fn split_by_page_count(
         .unwrap_or("output");
     let parent = output_dir.unwrap_or_else(|| pdf_path.parent().unwrap_or_else(|| Path::new(".")));
 
-    let pages: Vec<(u32, lopdf::ObjectId)> = doc.get_pages().into_iter().collect();
-    let total_pages = pages.len();
+    let total_pages = doc.get_pages().len();
 
     if total_pages == 0 {
         bail!("PDF has no pages");
@@ -232,6 +260,20 @@ pub fn split_by_page_count(
 
     let avg_chars = estimate_avg_chars_per_page(&doc);
     let pdf_type = classify_pdf(avg_chars);
+
+    // Pre-compute chunk page index ranges
+    let chunks: Vec<Vec<usize>> = {
+        let mut chunks = Vec::new();
+        let mut chunk: Vec<usize> = Vec::new();
+        for i in 0..total_pages {
+            chunk.push(i);
+            if chunk.len() < pages_per_chunk && i + 1 < total_pages {
+                continue;
+            }
+            chunks.push(std::mem::take(&mut chunk));
+        }
+        chunks
+    };
 
     let pb = if !quiet {
         let pb = ProgressBar::new(total_pages as u64);
@@ -247,23 +289,37 @@ pub fn split_by_page_count(
         ProgressBar::hidden()
     };
 
-    let mut chunk: Vec<usize> = Vec::new();
+    // Single working document — gets smaller as chunks are removed
+    let mut working = doc.clone();
     let mut part = 1u32;
     let mut output_files = Vec::new();
+    let mut pages_done = 0;
 
-    for i in 0..total_pages {
-        pb.inc(1);
-        chunk.push(i);
+    for chunk_indices in &chunks {
+        let mut chunk_doc = working.clone();
 
-        if chunk.len() < pages_per_chunk && i + 1 < total_pages {
-            continue;
+        // Delete pages after this chunk from the clone
+        let current_pages: Vec<u32> = chunk_doc.get_pages().into_iter().map(|(n, _)| n).collect();
+        if chunk_indices.len() < current_pages.len() {
+            let to_delete: Vec<u32> = current_pages[chunk_indices.len()..].to_vec();
+            chunk_doc.delete_pages(&to_delete);
+            chunk_doc.prune_objects();
         }
 
-        let out_path = save_chunk(&doc, parent, stem, &chunk, part)?;
-        print_chunk_info(&out_path, &chunk, pdf_type, avg_chars);
+        let out_path = parent.join(format!("{}_part{}.pdf", stem, part));
+        chunk_doc.save(&out_path)?;
+        print_chunk_info(&out_path, chunk_indices, pdf_type, avg_chars);
         output_files.push(out_path);
+
+        pages_done += chunk_indices.len();
+        pb.set_position(pages_done as u64);
+
+        // Remove this chunk's pages from working doc
+        let wc_pages: Vec<u32> = working.get_pages().into_iter().map(|(n, _)| n).collect();
+        working.delete_pages(&wc_pages[..chunk_indices.len()]);
+        working.prune_objects();
+
         part += 1;
-        chunk.clear();
     }
 
     pb.finish_with_message("完成");
@@ -271,6 +327,10 @@ pub fn split_by_page_count(
 }
 
 /// Like `split_by_page_count`, but sends log messages and page progress to callbacks (for GUI).
+///
+/// Uses a single working document that progressively shrinks — avoids O(N²)
+/// clone overhead by cloning progressively smaller documents instead of
+/// repeatedly cloning the full source.
 pub fn split_by_page_count_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
     pdf_path: &Path,
     output_dir: Option<&Path>,
@@ -286,8 +346,7 @@ pub fn split_by_page_count_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>
         .unwrap_or("output");
     let parent = output_dir.unwrap_or_else(|| pdf_path.parent().unwrap_or_else(|| Path::new(".")));
 
-    let pages: Vec<(u32, lopdf::ObjectId)> = doc.get_pages().into_iter().collect();
-    let total_pages = pages.len();
+    let total_pages = doc.get_pages().len();
 
     if total_pages == 0 {
         bail!("PDF has no pages");
@@ -298,38 +357,70 @@ pub fn split_by_page_count_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>
 
     let avg_chars = estimate_avg_chars_per_page(&doc);
     let pdf_type = classify_pdf(avg_chars);
+
+    // Pre-compute chunk page index ranges
+    let chunks: Vec<Vec<usize>> = {
+        let mut chunks = Vec::new();
+        let mut chunk: Vec<usize> = Vec::new();
+        for i in 0..total_pages {
+            chunk.push(i);
+            if chunk.len() < pages_per_chunk && i + 1 < total_pages {
+                continue;
+            }
+            chunks.push(std::mem::take(&mut chunk));
+        }
+        chunks
+    };
+
     progress(0, total_pages);
 
-    let mut chunk: Vec<usize> = Vec::new();
+    if control.is_stopped() {
+        log("  已停止");
+        return Ok(Vec::new());
+    }
+
+    // Single working document — gets smaller as chunks are removed
+    let mut working = doc.clone();
     let mut part = 1u32;
     let mut output_files = Vec::new();
+    let mut pages_done = 0;
 
-    for i in 0..total_pages {
+    for chunk_indices in &chunks {
         if control.is_stopped() {
             log("  已停止，保留已处理结果");
             break;
         }
-
         control.wait_if_paused();
-
         if control.is_stopped() {
             log("  已停止，保留已处理结果");
             break;
         }
 
-        progress(i + 1, total_pages);
-        chunk.push(i);
+        let mut chunk_doc = working.clone();
 
-        if chunk.len() < pages_per_chunk && i + 1 < total_pages {
-            continue;
+        // Delete pages after this chunk from the clone
+        let current_pages: Vec<u32> = chunk_doc.get_pages().into_iter().map(|(n, _)| n).collect();
+        if chunk_indices.len() < current_pages.len() {
+            let to_delete: Vec<u32> = current_pages[chunk_indices.len()..].to_vec();
+            chunk_doc.delete_pages(&to_delete);
+            chunk_doc.prune_objects();
         }
 
-        let out_path = save_chunk(&doc, parent, stem, &chunk, part)?;
-        let info = chunk_info_str(&out_path, &chunk, pdf_type, avg_chars);
+        let out_path = parent.join(format!("{}_part{}.pdf", stem, part));
+        chunk_doc.save(&out_path)?;
+        let info = chunk_info_str(&out_path, chunk_indices, pdf_type, avg_chars);
         log(&info);
         output_files.push(out_path);
+
+        pages_done += chunk_indices.len();
+        progress(pages_done, total_pages);
+
+        // Remove this chunk's pages from working doc
+        let wc_pages: Vec<u32> = working.get_pages().into_iter().map(|(n, _)| n).collect();
+        working.delete_pages(&wc_pages[..chunk_indices.len()]);
+        working.prune_objects();
+
         part += 1;
-        chunk.clear();
     }
 
     progress(total_pages, total_pages);
@@ -386,34 +477,34 @@ fn chunk_info_str(out_path: &Path, chunk: &[usize], pdf_type: &str, avg_chars: f
     )
 }
 
-/// Given individual page byte sizes and a max chunk size, partition page
-/// indices into chunks using a greedy prefix-sum algorithm.
-fn compute_chunks(page_sizes: &[u64], max_size: u64) -> Vec<Vec<usize>> {
+/// Given cumulative page sizes (cumulative[i] = exact byte size of pages
+/// [i..N) saved together), partition page indices into chunks using a
+/// greedy algorithm with exact size checks.
+fn compute_chunks_from_cumulative(cumulative: &[u64], max_size: u64) -> Vec<Vec<usize>> {
+    let total = cumulative.len() - 1;
     let mut chunks: Vec<Vec<usize>> = Vec::new();
-    let mut current: Vec<usize> = Vec::new();
-    let mut current_size: u64 = 0;
+    let mut start = 0;
 
-    for (i, &size) in page_sizes.iter().enumerate() {
-        if current_size + size <= max_size {
-            current.push(i);
-            current_size += size;
-        } else {
-            if !current.is_empty() {
-                chunks.push(std::mem::take(&mut current));
-                current_size = 0;
-            }
+    for end in 0..total {
+        let chunk_size = cumulative[start] - cumulative[end + 1];
 
-            if size > max_size {
+        if chunk_size > max_size {
+            if start == end {
                 // Single page exceeds limit — save as its own chunk
-                chunks.push(vec![i]);
+                chunks.push(vec![start]);
+                start = end + 1;
             } else {
-                current.push(i);
-                current_size = size;
+                // Pages [start..end) fit, but adding page 'end' would exceed limit
+                let mut chunk: Vec<usize> = (start..end).collect();
+                chunks.push(std::mem::take(&mut chunk));
+                start = end;
             }
         }
     }
-    if !current.is_empty() {
-        chunks.push(current);
+
+    if start < total {
+        chunks.push((start..total).collect());
     }
+
     chunks
 }
