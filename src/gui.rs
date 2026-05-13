@@ -73,6 +73,7 @@ enum WorkerMsg {
 
 pub struct App {
     source_label: String,
+    output_dir: Option<PathBuf>,
     files: Vec<PdfInfo>,
     logs: Vec<String>,
     max_size_mb: u64,
@@ -109,6 +110,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             source_label: String::new(),
+            output_dir: None,
             files: Vec::new(),
             logs: Vec::new(),
             max_size_mb: 50,
@@ -151,6 +153,7 @@ impl App {
             .pick_files()
         {
             self.source_label = format!("已选择 {} 个 PDF 文件", paths.len());
+            self.output_dir = Self::default_output_dir_from_inputs(&paths);
             self.scan_paths(paths);
         }
     }
@@ -158,7 +161,27 @@ impl App {
     fn pick_directory(&mut self) {
         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
             self.source_label = format!("目录: {}（递归）", dir.display());
+            self.output_dir = Some(dir.clone());
             self.scan_paths(vec![dir]);
+        }
+    }
+
+    fn pick_output_directory(&mut self) {
+        let mut dialog = rfd::FileDialog::new();
+        if let Some(dir) = &self.output_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(dir) = dialog.pick_folder() {
+            self.output_dir = Some(dir);
+        }
+    }
+
+    fn default_output_dir_from_inputs(inputs: &[PathBuf]) -> Option<PathBuf> {
+        let first = inputs.first()?;
+        if first.is_dir() {
+            Some(first.clone())
+        } else {
+            first.parent().map(Path::to_path_buf)
         }
     }
 
@@ -392,6 +415,7 @@ impl App {
         self.control = Some(control.clone());
 
         let files = selected_files;
+        let output_dir = self.output_dir.clone();
         let max_size = self.max_size_mb * 1024 * 1024;
         let pages_per_chunk = self.pages_per_chunk;
         let split_mode = self.split_mode;
@@ -424,6 +448,7 @@ impl App {
                 let split_result = match split_mode {
                     SplitMode::BySize => split::split_by_size_with_callback(
                         fpath,
+                        output_dir.as_deref(),
                         max_size,
                         &ctrl_clone,
                         move |msg| {
@@ -438,6 +463,7 @@ impl App {
                     ),
                     SplitMode::ByPages => split::split_by_page_count_with_callback(
                         fpath,
+                        output_dir.as_deref(),
                         pages_per_chunk,
                         &ctrl_clone,
                         move |msg| {
@@ -701,6 +727,10 @@ impl eframe::App for App {
                     self.pick_directory();
                 }
 
+                if ui.button("输出目录").clicked() && !self.running {
+                    self.pick_output_directory();
+                }
+
                 ui.add_enabled_ui(
                     !self.running && !self.files.is_empty() && self.selected_count() > 0,
                     |ui| {
@@ -787,6 +817,10 @@ impl eframe::App for App {
                             self.analysis_total
                         )),
                 );
+            }
+            if let Some(output_dir) = &self.output_dir {
+                ui.add_space(6.0);
+                ui.label(format!("输出目录: {}", output_dir.display()));
             }
             if self.running {
                 ui.add_space(6.0);

@@ -62,6 +62,7 @@ impl SplitControl {
 /// boundaries by prefix sum — O(n) instead of O(n·chunk_size) serializations.
 pub fn split_by_size(
     pdf_path: &Path,
+    output_dir: Option<&Path>,
     max_size: u64,
     quiet: bool,
 ) -> Result<Vec<PathBuf>> {
@@ -70,7 +71,7 @@ pub fn split_by_size(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("output");
-    let parent = pdf_path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = output_dir.unwrap_or_else(|| pdf_path.parent().unwrap_or_else(|| Path::new(".")));
 
     let total_pages = doc.get_pages().len();
     if total_pages == 0 {
@@ -131,6 +132,7 @@ pub fn split_by_size(
 /// then determines chunk boundaries by prefix sum.
 pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
     pdf_path: &Path,
+    output_dir: Option<&Path>,
     max_size: u64,
     control: &SplitControl,
     mut log: F,
@@ -141,7 +143,7 @@ pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("output");
-    let parent = pdf_path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = output_dir.unwrap_or_else(|| pdf_path.parent().unwrap_or_else(|| Path::new(".")));
 
     let total_pages = doc.get_pages().len();
     if total_pages == 0 {
@@ -206,6 +208,7 @@ pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
 /// Split a PDF into chunks with at most `pages_per_chunk` pages.
 pub fn split_by_page_count(
     pdf_path: &Path,
+    output_dir: Option<&Path>,
     pages_per_chunk: usize,
     quiet: bool,
 ) -> Result<Vec<PathBuf>> {
@@ -214,7 +217,7 @@ pub fn split_by_page_count(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("output");
-    let parent = pdf_path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = output_dir.unwrap_or_else(|| pdf_path.parent().unwrap_or_else(|| Path::new(".")));
 
     let pages: Vec<(u32, lopdf::ObjectId)> = doc.get_pages().into_iter().collect();
     let total_pages = pages.len();
@@ -269,6 +272,7 @@ pub fn split_by_page_count(
 /// Like `split_by_page_count`, but sends log messages and page progress to callbacks (for GUI).
 pub fn split_by_page_count_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
     pdf_path: &Path,
+    output_dir: Option<&Path>,
     pages_per_chunk: usize,
     control: &SplitControl,
     mut log: F,
@@ -279,7 +283,7 @@ pub fn split_by_page_count_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("output");
-    let parent = pdf_path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = output_dir.unwrap_or_else(|| pdf_path.parent().unwrap_or_else(|| Path::new(".")));
 
     let pages: Vec<(u32, lopdf::ObjectId)> = doc.get_pages().into_iter().collect();
     let total_pages = pages.len();

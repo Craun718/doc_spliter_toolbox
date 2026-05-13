@@ -69,8 +69,8 @@ pub fn run(cli: &Cli) -> Result<()> {
     for (idx, fpath) in files.iter().enumerate() {
         eprintln!("[{}/{}] 正在切割: {}", idx + 1, files.len(), fpath.display());
         let result = match cli.mode {
-            SplitModeArg::Size => split::split_by_size(fpath, max_size, cli.quiet),
-            SplitModeArg::Pages => split::split_by_page_count(fpath, cli.page_count, cli.quiet),
+            SplitModeArg::Size => split::split_by_size(fpath, None, max_size, cli.quiet),
+            SplitModeArg::Pages => split::split_by_page_count(fpath, None, cli.page_count, cli.quiet),
         };
         match result {
             Ok(outputs) => {
