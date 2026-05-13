@@ -132,6 +132,7 @@ pub fn extract_pages_to_bytes(
 }
 
 /// Extract specified page indices from source doc, write to file.
+#[allow(dead_code)]
 pub fn extract_pages_to_file(
     source: &Document,
     page_indices: &[usize],
