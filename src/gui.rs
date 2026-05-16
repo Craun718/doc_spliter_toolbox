@@ -11,12 +11,19 @@ use rayon::ThreadPoolBuilder;
 use walkdir::WalkDir;
 
 use crate::extract::{analyze_text_stats, classify_pdf, format_size};
+use crate::images;
 use crate::split::{self, SplitControl};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SplitMode {
     BySize,
     ByPages,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operation {
+    Split,
+    ExtractImages,
 }
 
 pub struct PdfInfo {
@@ -104,6 +111,7 @@ pub struct App {
     rx: Option<mpsc::Receiver<WorkerMsg>>,
     control: Option<Arc<SplitControl>>,
     show_delete_confirm: bool,
+    operation: Operation,
 }
 
 impl Default for App {
@@ -137,6 +145,7 @@ impl Default for App {
             rx: None,
             control: None,
             show_delete_confirm: false,
+            operation: Operation::Split,
         }
     }
 }
@@ -406,6 +415,7 @@ impl App {
         self.rx = Some(rx);
         self.running = true;
         self.paused = false;
+        self.operation = Operation::Split;
         self.total_progress = 0.0;
         self.current_file_name.clear();
         self.current_file_index = 0;
@@ -494,6 +504,114 @@ impl App {
                 });
 
                 // 文件级停止检查
+                if control.is_stopped() {
+                    let _ = tx.send(WorkerMsg::Log("处理已停止".to_string()));
+                    let _ = tx.send(WorkerMsg::Stopped);
+                    return;
+                }
+            }
+
+            let _ = tx.send(WorkerMsg::Log("全部完成！".to_string()));
+            let _ = tx.send(WorkerMsg::Finished);
+        });
+    }
+
+    fn start_extract_images(&mut self) {
+        if self.files.is_empty() || self.running {
+            return;
+        }
+
+        let selected_files: Vec<PathBuf> = self
+            .files
+            .iter()
+            .filter(|f| f.selected)
+            .map(|f| f.path.clone())
+            .collect();
+
+        if selected_files.is_empty() {
+            self.logs.push("未选择任何 PDF 文件".to_string());
+            return;
+        }
+
+        let (tx, rx) = mpsc::channel();
+        self.tx = Some(tx.clone());
+        self.rx = Some(rx);
+        self.running = true;
+        self.paused = false;
+        self.operation = Operation::ExtractImages;
+        self.total_progress = 0.0;
+        self.current_file_name.clear();
+        self.current_file_index = 0;
+        self.total_files_to_process = selected_files.len();
+        self.current_file_page = 0;
+        self.current_file_total_pages = 0;
+
+        let control = Arc::new(SplitControl::new());
+        self.control = Some(control.clone());
+
+        let files = selected_files;
+        let output_dir = self.output_dir.clone();
+
+        thread::spawn(move || {
+            let total = files.len();
+            for (idx, fpath) in files.iter().enumerate() {
+                if control.is_stopped() {
+                    let _ = tx.send(WorkerMsg::Log("处理已停止".to_string()));
+                    let _ = tx.send(WorkerMsg::Stopped);
+                    return;
+                }
+
+                let fname = fpath
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let _ = tx.send(WorkerMsg::FileStarted {
+                    index: idx + 1,
+                    total,
+                    name: fname.clone(),
+                });
+                let _ = tx.send(WorkerMsg::Log(format!(
+                    "[{}/{}] 正在提取图片: {}",
+                    idx + 1,
+                    total,
+                    fname
+                )));
+
+                let tx_log = tx.clone();
+                let tx_prog = tx.clone();
+                let ctrl_clone = control.clone();
+                let result = images::extract_images_with_callback(
+                    fpath,
+                    output_dir.as_deref(),
+                    &ctrl_clone,
+                    move |msg| {
+                        let _ = tx_log.send(WorkerMsg::Log(msg.to_string()));
+                    },
+                    move |current_page, total_pages| {
+                        let _ = tx_prog.send(WorkerMsg::FileProgress {
+                            current_page,
+                            total_pages,
+                        });
+                    },
+                );
+                match result {
+                    Ok(outputs) => {
+                        let _ = tx.send(WorkerMsg::Log(format!(
+                            "  → 提取 {} 张图片",
+                            outputs.len()
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(WorkerMsg::Log(format!("  错误: {}", e)));
+                    }
+                }
+
+                let _ = tx.send(WorkerMsg::FileDone {
+                    index: idx + 1,
+                    total,
+                });
+
                 if control.is_stopped() {
                     let _ = tx.send(WorkerMsg::Log("处理已停止".to_string()));
                     let _ = tx.send(WorkerMsg::Stopped);
@@ -628,7 +746,9 @@ impl App {
             self.paused = false;
             self.control = None;
             self.total_progress = 1.0;
-            self.show_delete_confirm = self.delete_after && self.selected_count() > 0;
+            self.show_delete_confirm = self.operation == Operation::Split
+                && self.delete_after
+                && self.selected_count() > 0;
         }
         if stopped {
             self.running = false;
@@ -738,6 +858,14 @@ impl eframe::App for App {
                     |ui| {
                     if ui.button("开始切割").clicked() {
                         self.start_split();
+                    }
+                });
+
+                ui.add_enabled_ui(
+                    !self.running && !self.files.is_empty() && self.selected_count() > 0,
+                    |ui| {
+                    if ui.button("提取图片").clicked() {
+                        self.start_extract_images();
                     }
                 });
 
