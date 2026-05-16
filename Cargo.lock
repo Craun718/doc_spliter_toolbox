@@ -1813,6 +1813,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2661,6 +2663,8 @@ dependencies = [
  "eframe",
  "egui",
  "egui_extras",
+ "flate2",
+ "image",
  "indicatif",
  "lopdf",
  "rayon",
