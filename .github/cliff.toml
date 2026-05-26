@@ -1,0 +1,42 @@
+[remote.github]
+owner = "Craun718"
+repo = "doc_spliter_toolbox"
+
+[changelog]
+header = """
+# Changelog
+"""
+
+body = """
+{% if version %}## {{ version | trim_start_matches(pat=\"v\") }} ({{ timestamp | date(format=\"%Y-%m-%d\") }}){% else %}## Unreleased{% endif %}
+
+{% for group, commits in commits | group_by(attribute=\"group\") %}
+### {{ group | striptags | trim }}
+{% for commit in commits %}
+- {{ commit.message | split(pat=\"\\n\") | first | upper_first }}
+{%- endfor %}
+{% endfor %}
+"""
+
+footer = """
+"""
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = false
+commit_parsers = [
+    { message = "^feat", group = "feat" },
+    { message = "^fix", group = "fix" },
+    { message = "^docs", group = "docs" },
+    { message = "^refactor", group = "refactor" },
+    { message = "^perf", group = "perf" },
+    { message = "^test", group = "test" },
+    { message = "^chore", group = "chore" },
+    { message = "^ci", group = "ci" },
+]
+sort_commits = "oldest"
+
+[git.github]
+commits = true

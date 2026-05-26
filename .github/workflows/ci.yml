@@ -23,7 +23,7 @@ jobs:
       is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -115,9 +115,32 @@ jobs:
           path: target/${{ matrix.target }}/release/${{ matrix.binary }}
           if-no-files-found: error
 
+  changelog:
+    if: ${{ needs.meta.outputs.is_release == 'true' }}
+    needs: meta
+    runs-on: ubuntu-latest
+    outputs:
+      release_body: ${{ steps.git-cliff.outputs.content }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        uses: orhun/git-cliff-action@v4
+        id: git-cliff
+        with:
+          config: .github/cliff.toml
+          args: >-
+            -vv --latest --strip header
+        env:
+          OUTPUT: CHANGES.md
+          GITHUB_REPO: ${{ github.repository }}
+
   release:
     if: ${{ needs.meta.outputs.is_release == 'true' }}
-    needs: [meta, build]
+    needs: [meta, build, changelog]
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifacts
@@ -150,6 +173,7 @@ jobs:
         with:
           tag_name: ${{ needs.meta.outputs.tag }}
           prerelease: ${{ needs.meta.outputs.is_prerelease == 'true' }}
+          body: ${{ needs.changelog.outputs.release_body }}
           files: |
             dist/*.zip
             dist/*.tar.gz
