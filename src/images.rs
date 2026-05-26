@@ -60,12 +60,12 @@ pub fn extract_images_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
 
     for (i, (_page_num, page_id)) in pages.iter().enumerate() {
         if control.is_stopped() {
-            log("  已停止，保留已处理结果");
+            log(&t!("images.stopped_preserving"));
             return Ok(outputs);
         }
         control.wait_if_paused();
         if control.is_stopped() {
-            log("  已停止，保留已处理结果");
+            log(&t!("images.stopped_preserving"));
             return Ok(outputs);
         }
 
@@ -132,7 +132,7 @@ pub fn extract_images_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
 
             match filter_chain.len() {
                 0 => {
-                    log(&format!("  跳过图片 ({} {} R): 无 filter", xobj_id.0, xobj_id.1));
+                    log(&t!("images.skip_no_filter", id1 = xobj_id.0, id2 = xobj_id.1));
                     continue;
                 }
                 1 => {
@@ -159,10 +159,7 @@ pub fn extract_images_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
                                     outputs.push(path);
                                 }
                                 Err(e) => {
-                                    log(&format!(
-                                        "  跳过图片 ({} {} R): CCITT 封装失败: {}",
-                                        xobj_id.0, xobj_id.1, e
-                                    ));
+                                    log(&t!("images.ccitt_wrap_failed", id1 = xobj_id.0, id2 = xobj_id.1, error = e));
                                 }
                             }
                         }
@@ -175,20 +172,12 @@ pub fn extract_images_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
                                     outputs.push(path);
                                 }
                                 Err(e) => {
-                                    log(&format!(
-                                        "  跳过图片 ({} {} R): FlateDecode 解码失败: {}",
-                                        xobj_id.0, xobj_id.1, e
-                                    ));
+                                    log(&t!("images.flate_decode_failed", id1 = xobj_id.0, id2 = xobj_id.1, error = e));
                                 }
                             }
                         }
                         other => {
-                            log(&format!(
-                                "  跳过图片 ({} {} R): 不支持的 filter {}",
-                                xobj_id.0,
-                                xobj_id.1,
-                                String::from_utf8_lossy(other)
-                            ));
+                            log(&t!("images.unsupported_filter", id1 = xobj_id.0, id2 = xobj_id.1, filter = String::from_utf8_lossy(other)));
                         }
                     }
                 }
@@ -197,12 +186,7 @@ pub fn extract_images_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
                         .iter()
                         .map(|f| String::from_utf8_lossy(f).to_string())
                         .collect();
-                    log(&format!(
-                        "  跳过图片 ({} {} R): 不支持的 filter 组合: {}",
-                        xobj_id.0,
-                        xobj_id.1,
-                        names.join(", ")
-                    ));
+                    log(&t!("images.unsupported_filter_combo", id1 = xobj_id.0, id2 = xobj_id.1, filters = names.join(", ")));
                 }
             }
 

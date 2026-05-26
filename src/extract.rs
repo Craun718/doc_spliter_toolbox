@@ -93,11 +93,11 @@ pub fn estimate_avg_chars_per_page(doc: &Document) -> f64 {
 }
 
 /// 根据平均每页字数判断PDF类型
-pub fn classify_pdf(avg_chars: f64) -> &'static str {
+pub fn classify_pdf(avg_chars: f64) -> String {
     if avg_chars >= 100.0 {
-        "电子版"
+        t!("extract.electronic").to_string()
     } else {
-        "扫描版"
+        t!("extract.scanned").to_string()
     }
 }
 

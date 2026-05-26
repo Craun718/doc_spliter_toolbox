@@ -15,30 +15,36 @@ pub enum SplitModeArg {
 #[derive(Parser)]
 #[command(
     name = "pdf-splitter",
-    about = "PDF 切割工具 — 无参数启动 GUI",
+    about = "PDF Splitter / PDF 切割工具 — Launch GUI without arguments / 无参数启动 GUI",
     version
 )]
 pub struct Cli {
+    /// PDF file or directory paths (multiple allowed, omit to launch GUI)
     /// PDF 文件或目录路径 (支持多个, 省略时启动 GUI)
     #[arg()]
     pub paths: Vec<PathBuf>,
 
+    /// Max chunk size in MB
     /// 单个分块最大大小 (MB)
     #[arg(short = 's', long, default_value_t = 50)]
     pub max_size: u64,
 
+    /// Pages per chunk when splitting by page count
     /// 按页数切分时每块页数
     #[arg(short = 'p', long, default_value_t = 100)]
     pub page_count: usize,
 
+    /// Split mode: size or pages
     /// 切分模式: size 或 pages
     #[arg(long, value_enum, default_value_t = SplitModeArg::Size)]
     pub mode: SplitModeArg,
 
+    /// Delete source files after successful split
     /// 切割成功后删除源文件
     #[arg(short = 'd', long)]
     pub delete: bool,
 
+    /// Quiet mode (no progress bar)
     /// 静默模式 (无进度条)
     #[arg(short = 'q', long)]
     pub quiet: bool,
@@ -49,16 +55,16 @@ pub fn run(cli: &Cli) -> Result<()> {
     let files = collect_pdf_files(&cli.paths)?;
 
     if files.is_empty() {
-        eprintln!("未找到 PDF 文件");
+        eprintln!("{}", t!("cli.no_pdf_found"));
         std::process::exit(1);
     }
 
     match cli.mode {
         SplitModeArg::Size => {
-            eprintln!("找到 {} 个 PDF 文件，按大小切分，每块上限 {} MB", files.len(), cli.max_size);
+            eprintln!("{}", t!("cli.found_by_size", count = files.len(), size = cli.max_size));
         }
         SplitModeArg::Pages => {
-            eprintln!("找到 {} 个 PDF 文件，按页数切分，每块 {} 页", files.len(), cli.page_count);
+            eprintln!("{}", t!("cli.found_by_pages", count = files.len(), pages = cli.page_count));
         }
     }
 
@@ -67,34 +73,34 @@ pub fn run(cli: &Cli) -> Result<()> {
     let mut files_to_delete: Vec<PathBuf> = Vec::new();
 
     for (idx, fpath) in files.iter().enumerate() {
-        eprintln!("[{}/{}] 正在切割: {}", idx + 1, files.len(), fpath.display());
+        eprintln!("{}", t!("cli.splitting", current = idx + 1, total = files.len(), name = fpath.display()));
         let result = match cli.mode {
             SplitModeArg::Size => split::split_by_size(fpath, None, max_size, cli.quiet),
             SplitModeArg::Pages => split::split_by_page_count(fpath, None, cli.page_count, cli.quiet),
         };
         match result {
             Ok(outputs) => {
-                eprintln!("  → 生成 {} 个文件", outputs.len());
+                eprintln!("{}", t!("cli.generated", count = outputs.len()));
                 succeeded += 1;
                 if cli.delete {
                     files_to_delete.push(fpath.clone());
                 }
             }
             Err(e) => {
-                eprintln!("  错误: {}", e);
+                eprintln!("{}", t!("cli.error", msg = e));
                 failed += 1;
             }
         }
     }
 
-    eprintln!("\n完成: {} 成功, {} 失败", succeeded, failed);
+    eprintln!("{}", t!("cli.done", succeeded = succeeded, failed = failed));
 
     if cli.delete && !files_to_delete.is_empty() {
         for f in &files_to_delete {
             if let Err(e) = std::fs::remove_file(f) {
-                eprintln!("删除失败 {}: {}", f.display(), e);
+                eprintln!("{}", t!("cli.delete_failed", path = f.display(), error = e));
             } else {
-                eprintln!("已删除: {}", f.display());
+                eprintln!("{}", t!("cli.deleted", path = f.display()));
             }
         }
     }

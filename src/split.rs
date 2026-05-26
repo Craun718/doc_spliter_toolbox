@@ -90,7 +90,7 @@ pub fn split_by_size(
                 .unwrap()
                 .progress_chars("█▓░"),
         );
-        pb.set_message(format!("测量 {}", pdf_path.file_name().unwrap_or_default().to_string_lossy()));
+        pb.set_message(t!("split.measuring", name = pdf_path.file_name().unwrap_or_default().to_string_lossy()));
         pb
     } else {
         ProgressBar::hidden()
@@ -115,7 +115,7 @@ pub fn split_by_size(
     pb.set_position(total_pages as u64);
 
     // Phase 2: exact serialization verification
-    pb.set_message(format!("保存 {}", pdf_path.file_name().unwrap_or_default().to_string_lossy()));
+    pb.set_message(t!("split.saving", name = pdf_path.file_name().unwrap_or_default().to_string_lossy()));
     pb.reset();
     pb.set_length(total_pages as u64);
 
@@ -145,13 +145,13 @@ pub fn split_by_size(
 
             let out_path = parent.join(format!("{}_part{}.pdf", stem, part));
             std::fs::write(&out_path, &bytes)?;
-            print_chunk_info(&out_path, &chunk, pdf_type, avg_chars);
+            print_chunk_info(&out_path, &chunk, &pdf_type, avg_chars);
             output_files.push(out_path);
             start = fitting_end;
         } else {
             let out_path = parent.join(format!("{}_part{}.pdf", stem, part));
             std::fs::write(&out_path, &bytes)?;
-            print_chunk_info(&out_path, &chunk, pdf_type, avg_chars);
+            print_chunk_info(&out_path, &chunk, &pdf_type, avg_chars);
             output_files.push(out_path);
             start = end;
         }
@@ -159,7 +159,7 @@ pub fn split_by_size(
         pb.set_position(start as u64);
     }
 
-    pb.finish_with_message("完成");
+    pb.finish_with_message(t!("split.done"));
     Ok(output_files)
 }
 
@@ -194,13 +194,13 @@ pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
     let mut cumulative_sizes = vec![0u64; total_pages + 1];
     {
         if control.is_stopped() {
-            log("  已停止，保留已处理结果");
+            log(&t!("split.stopped_preserving"));
             return Ok(Vec::new());
         }
         let mut working = doc.clone();
         control.wait_if_paused();
         if control.is_stopped() {
-            log("  已停止，保留已处理结果");
+            log(&t!("split.stopped_preserving"));
             return Ok(Vec::new());
         }
 
@@ -211,12 +211,12 @@ pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
 
         for i in 1..total_pages {
             if control.is_stopped() {
-                log("  已停止，保留已处理结果");
+                log(&t!("split.stopped_preserving"));
                 return Ok(Vec::new());
             }
             control.wait_if_paused();
             if control.is_stopped() {
-                log("  已停止，保留已处理结果");
+                log(&t!("split.stopped_preserving"));
                 return Ok(Vec::new());
             }
 
@@ -236,12 +236,12 @@ pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
 
     while start < total_pages {
         if control.is_stopped() {
-            log("  已停止，保留已处理结果");
+            log(&t!("split.stopped_preserving"));
             break;
         }
         control.wait_if_paused();
         if control.is_stopped() {
-            log("  已停止，保留已处理结果");
+            log(&t!("split.stopped_preserving"));
             break;
         }
 
@@ -262,7 +262,7 @@ pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
         if bytes.len() as u64 > max_size && chunk.len() > 1 {
             let fitting_end = find_fitting_end_with_control(&doc, start, end, max_size, control)?;
             let Some(fitting_end) = fitting_end else {
-                log("  已停止，保留已处理结果");
+                log(&t!("split.stopped_preserving"));
                 break;
             };
 
@@ -271,14 +271,14 @@ pub fn split_by_size_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>(
 
             let out_path = parent.join(format!("{}_part{}.pdf", stem, part));
             std::fs::write(&out_path, &bytes)?;
-            let info = chunk_info_str(&out_path, &chunk, pdf_type, avg_chars);
+            let info = chunk_info_str(&out_path, &chunk, &pdf_type, avg_chars);
             log(&info);
             output_files.push(out_path);
             start = fitting_end;
         } else {
             let out_path = parent.join(format!("{}_part{}.pdf", stem, part));
             std::fs::write(&out_path, &bytes)?;
-            let info = chunk_info_str(&out_path, &chunk, pdf_type, avg_chars);
+            let info = chunk_info_str(&out_path, &chunk, &pdf_type, avg_chars);
             log(&info);
             output_files.push(out_path);
             start = end;
@@ -344,7 +344,7 @@ pub fn split_by_page_count(
                 .unwrap()
                 .progress_chars("█▓░"),
         );
-        pb.set_message(format!("切割 {}", pdf_path.file_name().unwrap_or_default().to_string_lossy()));
+        pb.set_message(t!("split.splitting", name = pdf_path.file_name().unwrap_or_default().to_string_lossy()));
         pb
     } else {
         ProgressBar::hidden()
@@ -369,7 +369,7 @@ pub fn split_by_page_count(
 
         let out_path = parent.join(format!("{}_part{}.pdf", stem, part));
         chunk_doc.save(&out_path)?;
-        print_chunk_info(&out_path, chunk_indices, pdf_type, avg_chars);
+        print_chunk_info(&out_path, chunk_indices, &pdf_type, avg_chars);
         output_files.push(out_path);
 
         pages_done += chunk_indices.len();
@@ -383,7 +383,7 @@ pub fn split_by_page_count(
         part += 1;
     }
 
-    pb.finish_with_message("完成");
+    pb.finish_with_message(t!("split.done"));
     Ok(output_files)
 }
 
@@ -436,7 +436,7 @@ pub fn split_by_page_count_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>
     progress(0, total_pages);
 
     if control.is_stopped() {
-        log("  已停止");
+        log(&t!("split.stopped"));
         return Ok(Vec::new());
     }
 
@@ -448,12 +448,12 @@ pub fn split_by_page_count_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>
 
     for chunk_indices in &chunks {
         if control.is_stopped() {
-            log("  已停止，保留已处理结果");
+            log(&t!("split.stopped_preserving"));
             break;
         }
         control.wait_if_paused();
         if control.is_stopped() {
-            log("  已停止，保留已处理结果");
+            log(&t!("split.stopped_preserving"));
             break;
         }
 
@@ -469,7 +469,7 @@ pub fn split_by_page_count_with_callback<F: FnMut(&str), P: FnMut(usize, usize)>
 
         let out_path = parent.join(format!("{}_part{}.pdf", stem, part));
         chunk_doc.save(&out_path)?;
-        let info = chunk_info_str(&out_path, chunk_indices, pdf_type, avg_chars);
+        let info = chunk_info_str(&out_path, chunk_indices, &pdf_type, avg_chars);
         log(&info);
         output_files.push(out_path);
 
@@ -493,17 +493,19 @@ fn print_chunk_info(out_path: &Path, chunk: &[usize], pdf_type: &str, avg_chars:
         .map(|m| m.len())
         .unwrap_or(0);
     let page_range = if chunk.len() > 1 {
-        format!("第 {}-{} 页", chunk[0] + 1, chunk.last().unwrap() + 1)
+        t!("split.page_range", start = chunk[0] + 1, end = chunk.last().unwrap() + 1)
     } else {
-        format!("第 {} 页", chunk[0] + 1)
+        t!("split.page", num = chunk[0] + 1)
     };
     eprintln!(
-        "  {} ({}, {}, {}, 平均{:.0}字/页)",
-        out_path.file_name().unwrap_or_default().to_string_lossy(),
-        page_range,
-        format_size(size),
-        pdf_type,
-        avg_chars
+        "{}",
+        t!("split.chunk_info",
+            name = out_path.file_name().unwrap_or_default().to_string_lossy(),
+            pages = page_range,
+            size = format_size(size),
+            classification = pdf_type,
+            avg = avg_chars
+        )
     );
 }
 
@@ -512,18 +514,17 @@ fn chunk_info_str(out_path: &Path, chunk: &[usize], pdf_type: &str, avg_chars: f
         .map(|m| m.len())
         .unwrap_or(0);
     let page_range = if chunk.len() > 1 {
-        format!("第 {}-{} 页", chunk[0] + 1, chunk.last().unwrap() + 1)
+        t!("split.page_range", start = chunk[0] + 1, end = chunk.last().unwrap() + 1)
     } else {
-        format!("第 {} 页", chunk[0] + 1)
+        t!("split.page", num = chunk[0] + 1)
     };
-    format!(
-        "  {} ({}, {}, {}, 平均{:.0}字/页)",
-        out_path.file_name().unwrap_or_default().to_string_lossy(),
-        page_range,
-        format_size(size),
-        pdf_type,
-        avg_chars
-    )
+    t!("split.chunk_info",
+        name = out_path.file_name().unwrap_or_default().to_string_lossy(),
+        pages = page_range,
+        size = format_size(size),
+        classification = pdf_type,
+        avg = avg_chars
+    ).to_string()
 }
 
 /// Binary search for the largest end > start such that the actual
