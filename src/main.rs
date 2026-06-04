@@ -1,18 +1,15 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod cli;
+mod gui;
+
 #[macro_use]
 extern crate rust_i18n;
 
 i18n!("locales", fallback = "zh");
 
-mod cli;
-mod extract;
-mod gui;
-mod i18n;
-mod images;
-mod split;
-
 use clap::Parser;
+use pdf_splitter::{extract, i18n, images, split};
 
 #[cfg(target_os = "windows")]
 mod win32 {
